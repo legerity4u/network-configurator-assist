@@ -1,0 +1,4 @@
+#configuration
+.config*.*
+#logs
+*.log
