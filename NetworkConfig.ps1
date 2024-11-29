@@ -132,39 +132,35 @@ function Test-InternetConnection {
     }
 }
 
+# Remove existing IPs and gateways
+function Clear-NetworkConfig {
+    param ([string]$AdapterName)
+
+    try {
+        Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Log "Removing IP: $($_.IPAddress) from $AdapterName"
+            Remove-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        Get-NetIPConfiguration -InterfaceAlias $AdapterName | Select-Object -ExpandProperty IPv4DefaultGateway | ForEach-Object {
+            Write-Log "Removing gateway: $($_.NextHop) from $AdapterName"
+            Remove-NetRoute -InterfaceAlias $AdapterName -NextHop $_.NextHop -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Log "Error clearing network configuration: $_"
+    }
+}
+
 # Configure static IP
 function Configure-StaticIP {
     param ([string]$AdapterName, [string]$FixedIP, [int]$PrefixLength, [string]$Gateway, [array]$DnsServers)
-    try {
-        # Remove existing IP addresses and gateways
-        $existingIPs = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        if ($existingIPs) {
-            Write-Log "Removing existing IP addresses for $AdapterName."
-            foreach ($ip in $existingIPs) {
-                Remove-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $ip.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-
-        $existingGateways = Get-NetIPConfiguration -InterfaceAlias $AdapterName | Select-Object -ExpandProperty IPv4DefaultGateway
-        if ($existingGateways) {
-            Write-Log "Removing existing default gateway for $AdapterName."
-            foreach ($gw in $existingGateways) {
-                Remove-NetRoute -InterfaceAlias $AdapterName -NextHop $gw.NextHop -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-
-        # Set new IP address and gateway
-        Write-Log "Configuring static IP: $FixedIP/$PrefixLength, Gateway: $Gateway for $AdapterName."
-        New-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $FixedIP -PrefixLength $PrefixLength -DefaultGateway $Gateway -Confirm:$false
-
-        # Configure DNS servers
-        Write-Log "Configuring for $AdapterName DNS servers: $($DnsServers -join ', ')."
-        Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ServerAddresses $DnsServers -Confirm:$false
-
-        Write-Log "Static IP and DNS configured for adapter: $AdapterName."
-    } catch {
-        Write-Log "Error configuring static IP: $_"
-    }
+    Clear-NetworkConfig -AdapterName $AdapterName
+    # Set new IP address and gateway
+    Write-Log "Configuring static IP: $FixedIP/$PrefixLength, Gateway: $Gateway for $AdapterName."
+    New-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $FixedIP -PrefixLength $PrefixLength -DefaultGateway $Gateway -Confirm:$false | Out-Null
+    # Configure DNS servers
+    Write-Log "Configuring for $AdapterName DNS servers: $($DnsServers -join ', ')."
+    Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ServerAddresses $DnsServers -Confirm:$false | Out-Null
+    Write-Log "Static IP and DNS configured for adapter: $AdapterName."
 }
 
 # Load configuration
@@ -219,38 +215,30 @@ Disable-OtherAdapters -KeepInterfaceName $AdapterName
 
 if (-not (Test-InternetConnection -InterfaceName $AdapterName)) {
     Write-Log "No internet connection. Trying DHCP configuration..."
-    try {
-        # Remove existing IP addresses and gateways
-        $existingIPs = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue
-        if ($existingIPs) {
-            Write-Log "Removing existing IP addresses for $AdapterName."
-            foreach ($ip in $existingIPs) {
-                Remove-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $ip.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-
-        $existingGateways = Get-NetIPConfiguration -InterfaceAlias $AdapterName | Select-Object -ExpandProperty IPv4DefaultGateway
-        if ($existingGateways) {
-            Write-Log "Removing existing default gateway for $AdapterName."
-            foreach ($gw in $existingGateways) {
-                Remove-NetRoute -InterfaceAlias $AdapterName -NextHop $gw.NextHop -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        }
-    } catch {
-        Write-Log "Error removing static IP: $_"
-    }
+    Clear-NetworkConfig -AdapterName $AdapterName
     Set-NetIPInterface -InterfaceAlias $AdapterName -Dhcp Enabled -Confirm:$false
     Restart-NetAdapter -Name $AdapterName
+    Write-Log "Wait 10 seconds for applying parameters."
     Start-Sleep -Seconds 15
     if (-not (Test-InternetConnection -InterfaceName $AdapterName)) {
         Write-Log "DHCP configuration failed. Switching to static IP..."
         $config = Initialize-Configuration -EncryptedFilePath $EncryptedFilePath
         if (-not $config) { exit }
-        Write-Log "Loaded configuration: $($config | ConvertTo-Json -Depth 10)"
+        Write-Log "Loaded configuration: \n $($config | ConvertTo-Json -Depth 10)"
         Configure-StaticIP -AdapterName $AdapterName -FixedIP $config.FixedIP -PrefixLength $config.PrefixLength -Gateway $config.Gateway -DnsServers $config.DnsServers
         Restart-NetAdapter -Name $AdapterName
+        Write-Log "Wait 10 seconds for applying parameters."
+        Start-Sleep -Seconds 10 # Waiting for changing AddressState from Tentaitive to Preffered
     }
 }
-
-Write-Log "Network configuration completed."
+# Checking IP status
+$currentIPs = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4
+foreach ($ip in $currentIPs) {
+    if ($ip.AddressState -eq "Preferred") {
+        Write-Log "IP address $($ip.IPAddress) is active and preferred on adapter $AdapterName."
+    } else {
+        Write-Log "IP address $($ip.IPAddress) is in state: $($ip.AddressState)."
+    }
+}
 Enable-DisabledAdapters
+Write-Log "Network configuration completed."
