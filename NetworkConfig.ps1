@@ -136,19 +136,32 @@ function Test-InternetConnection {
 function Configure-StaticIP {
     param ([string]$AdapterName, [string]$FixedIP, [int]$PrefixLength, [string]$Gateway, [array]$DnsServers)
     try {
-        # Удаление текущих IP-адресов
-        $currentIPs = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4
-        if ($currentIPs) {
+        # Remove existing IP addresses and gateways
+        $existingIPs = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        if ($existingIPs) {
             Write-Log "Removing existing IP addresses for $AdapterName."
-            $currentIPs | Remove-NetIPAddress -Confirm:$false
-            Start-Sleep -Seconds 5 # Ожидание, чтобы гарантировать удаление
+            foreach ($ip in $existingIPs) {
+                Remove-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $ip.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
         }
-        
-        # Добавление нового статического IP-адреса
+
+        $existingGateways = Get-NetIPConfiguration -InterfaceAlias $AdapterName | Select-Object -ExpandProperty IPv4DefaultGateway
+        if ($existingGateways) {
+            Write-Log "Removing existing default gateway for $AdapterName."
+            foreach ($gw in $existingGateways) {
+                Remove-NetRoute -InterfaceAlias $AdapterName -NextHop $gw.NextHop -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Set new IP address and gateway
+        Write-Log "Configuring static IP: $FixedIP/$PrefixLength, Gateway: $Gateway for $AdapterName."
         New-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $FixedIP -PrefixLength $PrefixLength -DefaultGateway $Gateway -Confirm:$false
+
+        # Configure DNS servers
+        Write-Log "Configuring for $AdapterName DNS servers: $($DnsServers -join ', ')."
         Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ServerAddresses $DnsServers -Confirm:$false
-        Start-Sleep -Seconds 5 # Ожидание, чтобы настройки применились
-        Write-Log "Static IP and DNS configured for adapter: $AdapterName"
+
+        Write-Log "Static IP and DNS configured for adapter: $AdapterName."
     } catch {
         Write-Log "Error configuring static IP: $_"
     }
@@ -206,6 +219,26 @@ Disable-OtherAdapters -KeepInterfaceName $AdapterName
 
 if (-not (Test-InternetConnection -InterfaceName $AdapterName)) {
     Write-Log "No internet connection. Trying DHCP configuration..."
+    try {
+        # Remove existing IP addresses and gateways
+        $existingIPs = Get-NetIPAddress -InterfaceAlias $AdapterName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        if ($existingIPs) {
+            Write-Log "Removing existing IP addresses for $AdapterName."
+            foreach ($ip in $existingIPs) {
+                Remove-NetIPAddress -InterfaceAlias $AdapterName -IPAddress $ip.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
+
+        $existingGateways = Get-NetIPConfiguration -InterfaceAlias $AdapterName | Select-Object -ExpandProperty IPv4DefaultGateway
+        if ($existingGateways) {
+            Write-Log "Removing existing default gateway for $AdapterName."
+            foreach ($gw in $existingGateways) {
+                Remove-NetRoute -InterfaceAlias $AdapterName -NextHop $gw.NextHop -Confirm:$false -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        Write-Log "Error removing static IP: $_"
+    }
     Set-NetIPInterface -InterfaceAlias $AdapterName -Dhcp Enabled -Confirm:$false
     Restart-NetAdapter -Name $AdapterName
     Start-Sleep -Seconds 15
