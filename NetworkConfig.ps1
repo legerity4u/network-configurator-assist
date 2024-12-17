@@ -152,7 +152,7 @@ function Clear-NetworkConfig {
 
 # Configure static IP
 function Configure-StaticIP {
-    param ([string]$AdapterName, [string]$FixedIP, [int]$PrefixLength, [string]$Gateway, [array]$DnsServers)
+    param ([string]$AdapterName, [string]$FixedIP, [int]$PrefixLength, [string]$Gateway, [array]$DnsServers, [array]$WinsServers)
     Clear-NetworkConfig -AdapterName $AdapterName
     # Set new IP address and gateway
     Write-Log "Configuring static IP: $FixedIP/$PrefixLength, Gateway: $Gateway for $AdapterName."
@@ -160,6 +160,18 @@ function Configure-StaticIP {
     # Configure DNS servers
     Write-Log "Configuring for $AdapterName DNS servers: $($DnsServers -join ', ')."
     Set-DnsClientServerAddress -InterfaceAlias $AdapterName -ServerAddresses $DnsServers -Confirm:$false | Out-Null
+    # Configure WINS servers
+    Write-Log "Configuring for $AdapterName WINS servers: $($WinsServers -join ', ')."
+    Set-DnsClient -InterfaceAlias $AdapterName -RegisterThisConnectionsAddress $true
+    # Use WMI to set WINS server addresses
+    $wins = Get-WmiObject -Class Win32_NetworkAdapterConfiguration | Where-Object { $_.Description -eq $AdapterName }
+    if ($wins) {
+        # Set the WINS server addresses
+        $wins.SetWINSServer($WinsServers)
+        Write-Log "WINS servers configured successfully."
+    } else {
+        Write-Log "Failed to find adapter configuration for $AdapterName."
+    }
     Write-Log "Static IP and DNS configured for adapter: $AdapterName."
 }
 
@@ -181,7 +193,7 @@ function Initialize-Configuration {
             return $null
         }
 
-        if (-not $decryptedConfig.FixedIP -or -not $decryptedConfig.PrefixLength -or -not $decryptedConfig.Gateway -or -not $decryptedConfig.DnsServers) {
+        if (-not $decryptedConfig.FixedIP -or -not $decryptedConfig.PrefixLength -or -not $decryptedConfig.Gateway -or -not $decryptedConfig.DnsServers -or -not $decryptedConfig.WinsServers) {
             Write-Log "Missing required configuration parameters in decrypted file."
             return $null
         }
@@ -225,7 +237,7 @@ if (-not (Test-InternetConnection -InterfaceName $AdapterName)) {
         $config = Initialize-Configuration -EncryptedFilePath $EncryptedFilePath
         if (-not $config) { exit }
         Write-Log "Loaded configuration: \n $($config | ConvertTo-Json -Depth 10)"
-        Configure-StaticIP -AdapterName $AdapterName -FixedIP $config.FixedIP -PrefixLength $config.PrefixLength -Gateway $config.Gateway -DnsServers $config.DnsServers
+        Configure-StaticIP -AdapterName $AdapterName -FixedIP $config.FixedIP -PrefixLength $config.PrefixLength -Gateway $config.Gateway -DnsServers $config.DnsServers -WinsServers $config.WinsServers
         Restart-NetAdapter -Name $AdapterName
         Write-Log "Wait 10 seconds for applying parameters."
         Start-Sleep -Seconds 10 # Waiting for changing AddressState from Tentaitive to Preffered
