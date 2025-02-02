@@ -2,3 +2,8 @@
 .config*.*
 #logs
 *.log
+*.bak
+.gigaide
+.git/*
+.idea*
+.vscode*
