@@ -3,25 +3,27 @@ param (
     [switch]$Help,
     [string]$EncryptedFilePath
 )
+Write-Host "`n`nThis script is used to automatically configure a wired network adapter" -ForegroundColor Green
+Write-Host "to work either on a DHCP network or on a network with static parameters." -ForegroundColor Green
 
 # Check for the Help switch first
 if ($Help) {
-    Write-Host "This script is used to automatically configure a wired network adapter" -ForegroundColor Yellow
-    Write-Host "to work either on a DHCP network or on a network with static parameters." -ForegroundColor Yellow
+    Write-Host "`n`nUsage: " -ForegroundColor Green
+    Write-Host "`t.\NetworkConfig.ps1 -EncryptedFilePath " -ForegroundColor DarkYellow -NoNewLine
+    Write-Host "<path_to_encrypted_file>" -ForegroundColor Blue -NoNewline
+    Write-Host "  [-Help]" -ForegroundColor DarkCyan
     Write-Host ""
-    Write-Host "Usage: .\NetworkConfig.ps1 -EncryptedFilePath <path_to_encrypted_file> [-Help]" -ForegroundColor DarkCyan
-    Write-Host ""
-    Write-Host "Parameters:"
-    Write-Host "  -EncryptedFilePath <path_to_encrypted_file>: Specify the path where encrypted network config is located. (Mandatory)"
-    Write-Host "  -Help: Display this help message. (Optional)"
+    Write-Host "Parameters:" -ForegroundColor Green
+    Write-Host " `t-EncryptedFilePath <path_to_encrypted_file> " -ForegroundColor DarkCyan -NoNewline
+    Write-Host "`t:   Specify the path where encrypted network for static configuration is located. (" -ForegroundColor Gray -NoNewline
+    Write-Host "Mandatory" -ForegroundColor DarkYellow -NoNewline
+    Write-Host ")" -ForegroundColor Gray
+    Write-Host " `t-Help" -ForegroundColor DarkCyan -NoNewline
+    Write-Host "`t: Display this help message. (" -ForegroundColor Gray -NoNewline
+    Write-Host "Optional"  -ForegroundColor DarkYellow -NoNewline
+    Write-Host ")`n`n" -ForegroundColor Gray
     exit
 }
-
-# Check for admin privileges
-# if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-#     Write-Host "This script must be run as Administrator." -ForegroundColor Red
-#     exit 1
-# }
 
 # Resolve paths
 try { 
@@ -30,8 +32,11 @@ try {
     Write-Host "Encrypted configuration file not found: $EncryptedFilePath" -ForegroundColor Red
     exit 1
 }
+
+
 $LogFilePath = Join-Path $PSScriptRoot ".netconf.log"
-Write-Host "See Log file: $LogFilePath"
+Write-Host "See Log file: " -NoNewLine
+Write-Host "$LogFilePath" -ForegroundColor Cyan
 
 # Logging function
 function Write-Log {
@@ -51,36 +56,62 @@ function Read-Config {
     param ([string]$EncryptedFilePath)
 
     if (-not (Test-Path -Path $EncryptedFilePath)) {
-        Write-Log "File not found: $EncryptedFilePath"
+        Write-Log "File not found: $EncryptedFilePath" "ERROR"
         return $null
     }
-    $decryptionPassword = Read-Host -Prompt "Enter decryption password" -AsSecureString
-    $decryptionPlainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($decryptionPassword)
-    )
-
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    $decryptionKey = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($decryptionPlainPassword))
-    
-    try {
-        $encryptedContent = Get-Content -Raw -Path $EncryptedFilePath -Encoding UTF8
-        if ($decryptionKey.Length -ne 32) { $decryptionKey = $decryptionKey[0..31] }
-        $decryptedSecureString = ConvertTo-SecureString -String $encryptedContent -Key $decryptionKey
-        $decryptedContent = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($decryptedSecureString)
+    $maxAttempts = 3
+    $attempts = 0
+    $decryptedContent = $null
+    while ($attempts -lt $maxAttempts) {
+        # Request the password from the user
+        $decryptionPassword = Read-Host -Prompt "Enter decryption password:   " -AsSecureString
+        $decryptionPlainPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($decryptionPassword)
         )
 
+        # Password generation
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $decryptionKey = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($decryptionPlainPassword))
+
         try {
-            $decryptedJson = $decryptedContent | ConvertFrom-Json
-            Write-Log "Decryption successful. JSON structure is valid."
-            return $decryptedJson
+            # Reading encrypted contents
+            $encryptedContent = Get-Content -Raw -Path $EncryptedFilePath -Encoding UTF8
+
+            # We will make sure that the key length is 32 bytes
+            if ($decryptionKey.Length -ne 32) { 
+                $decryptionKey = $decryptionKey[0..31] 
+            }
+
+            # Trying to decrypt with suppression of systemic errors
+            $ErrorActionPreference = "Stop"  # We will make sure that errors become terminal
+            try {
+                $decryptedSecureString = ConvertTo-SecureString -String $encryptedContent -Key $decryptionKey -ErrorAction Stop
+                $decryptedContent = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($decryptedSecureString)
+                )
+
+                # We check whether the decrypted contents are correct json
+                try {
+                    $decryptedJson = $decryptedContent | ConvertFrom-Json
+                    Write-Log "Decryption successful. JSON structure is valid." "INFO"
+                    return $decryptedJson
+                } catch {
+                    Write-Log "Decrypted file is not valid JSON." "ERROR"
+                    return $null
+                }
+            } catch {
+                # Error processing during decoding
+                Write-Log "Incorrect password or corrupted file. Please try again." "ERROR"
+                $attempts++
+                if ($attempts -eq $maxAttempts) {
+                    Write-Log "Maximum attempts reached. Exiting." "ERROR"
+                    return $null
+                }
+            }
         } catch {
-            Write-Log "Decrypted file is not valid JSON."
+            Write-Log "Error reading the encrypted file: $_" "ERROR"
             return $null
         }
-    } catch {
-        Write-Log "Error decrypting file: $_"
-        return $null
     }
 }
 
@@ -90,7 +121,6 @@ function Test-InternetConnection {
     
     # Get adapter by InterfaceId
     $adapter = Get-NetAdapter | Where-Object { $_.InterfaceIndex -eq $InterfaceId }
-    #Write-Log "[Test-InternetConnection] adapter='$($adapter.Name)' Status='$($adapter.Status)' MediaConnectionState='$($adapter.MediaConnectionState)'" "INFO"
     if ($null -eq $adapter) {
         return $false
     }
@@ -99,8 +129,8 @@ function Test-InternetConnection {
     if ($adapter.Status -eq "Up" -and $adapter.MediaConnectionState -eq "Connected") {
         # Ckeck IP-address
         $sourceAddress = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $InterfaceId
-        Write-Log "[Test-InternetConnection] sourceAddress='$($sourceAddress.IPAddress)'" "INFO"
         if ($sourceAddress.IPAddress -like "169.254.*") {
+            Write-Log "[Test-InternetConnection] sourceAddress was selfassigned = '$($sourceAddress.IPAddress)'" "WARN"
             return $false
         }
         
@@ -115,8 +145,6 @@ function Test-InternetConnection {
         return $false
     }
 }
-
-
 
 # Function for converting the prefix length into the subnet mask
 function ConvertTo-SubnetMask {
@@ -170,27 +198,20 @@ function Get-NetworkAdapterProperties {
     param (
         [int]$InterfaceId
     )
-
     $result = ""
-
     # Get adapter by InterfaceId
     $adapter = Get-NetAdapter | Where-Object {$_.InterfaceIndex -eq $InterfaceId}
-    
     if ($null -eq $adapter) {
         $result += "Adapter with the specified Interfaceid was not found.`n"
         return $result
     }
-
     # Get adapter description
     $result += "Ethernet adapter '$($adapter.Name)':`n"
-    
     # Get the state of connection with the network
     $mediaState = Get-MediaState -InterfaceIndex $InterfaceId
     $result += "   Media State . . . . . . . . . . . : $mediaState`n"
-
     $result += "   Description . . . . . . . . . . . : $($adapter.InterfaceDescription)`n"
     $result += "   Physical Address. . . . . . . . . : $($adapter.MacAddress)`n"
-
     # Get Connection-specific DNS Suffix
     $wmiAdapter = Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex = $InterfaceId"
     if ($wmiAdapter) {
@@ -219,7 +240,6 @@ function Get-NetworkAdapterProperties {
                     $leaseExpires = $wmiAdapter.DHCPLeaseExpires
                     $leaseExpiresDateTime = [Management.ManagementDateTimeConverter]::ToDateTime($leaseExpires)
                     $leaseObtainedDateTime = [Management.ManagementDateTimeConverter]::ToDateTime($leaseObtained)
-
                     $result += "   Lease Expires . . . . . . . . . . : $($leaseExpiresDateTime.ToString('f'))`n"#.ToString('D')) $($leaseExpires.ToString('T'))`n"
                     $result += "   Lease Obtained. . . . . . . . . . : $($leaseObtainedDateTime.ToString('f'))`n"#.ToString('D')) $($leaseObtained.ToString('T'))`n"
                     $result += "   DHCP Server . . . . . . . . . . . : $($wmiAdapter.DHCPServer)`n"
@@ -229,12 +249,10 @@ function Get-NetworkAdapterProperties {
                 $result += "   Subnet Mask . . . . . . . . . . . : $(ConvertTo-SubnetMask -PrefixLength $address.PrefixLength)`n"
             }
         }
-
         # Get default gateway
         if ($ipConfig.IPv4DefaultGateway.NextHop) {
             $result += "   Default Gateway . . . . . . . . . : $($ipConfig.IPv4DefaultGateway.NextHop)`n"
         }
-
         # Get DNS servers
         $dnsServers = Get-DnsClientServerAddress -InterfaceIndex $InterfaceId -AddressFamily IPv4
         if ($dnsServers) {
@@ -242,7 +260,6 @@ function Get-NetworkAdapterProperties {
             foreach ($server in $dnsServers) {
                 $allDnsServers += $server.ServerAddresses
             }
-            
             if ($allDnsServers.Count -gt 0) {
                 $result += "   DNS Servers . . . . . . . . . . . : $($allDnsServers[0])`n"
                 for ($i = 1; $i -lt $allDnsServers.Count; $i++) {
@@ -250,7 +267,6 @@ function Get-NetworkAdapterProperties {
                 }
             } else {$result += "   DNS Servers . . . . . . . . . . . : None`n"}
         } else {$result += "   DNS Servers . . . . . . . . . . . : None`n"}
-
         # Get WINS servers
         if ($wmiAdapter) {
             $winsOutput = netsh interface ipv4 show wins name="$($adapter.Name)"
@@ -261,10 +277,8 @@ function Get-NetworkAdapterProperties {
                     $ipAddress = ($line -replace '.*: ', '').Trim()
                     $winsArray += $ipAddress
                 }
-                
                 # Get primary WINS server
                 $result += "   Primary WINS Server . . . . . . . : $($winsArray[0])`n"
-
                 # Get secondary WINS servers
                 if ($winsArray.Count -gt 1) {
                     $result += "   Secondary WINS Server . . . . . . : $($winsArray[1])`n"
@@ -274,13 +288,11 @@ function Get-NetworkAdapterProperties {
                 } else {
                     $result += "   Secondary WINS Server . . . . . . : None`n"
                 }
-
             } else {
                 $result += "   Primary WINS Server . . . . . . . : None`n"
                 $result += "   Secondary WINS Server . . . . . . : None`n"
             }
         }
-
         # Get NetBIOS over Tcpip
         if ($wmiAdapter) {
             $netbiosStatus = $wmiAdapter.TcpipNetbiosOptions
@@ -307,18 +319,18 @@ function Clear-NetworkConfig {
         return $false
     }
 
-    # Отключаем DHCP, если он включен
+    # Disconnect DHCP if it is turned on
     Set-NetIPInterface -InterfaceIndex $InterfaceId -Dhcp Disabled
 
-    # Проверяем состояние DHCP
+    # Check the condition of DHCP
     $dhcpStatus = Get-NetIPInterface -InterfaceIndex $InterfaceId | Select-Object Dhcp
-    Write-Log "Состояние DHCP для интерфейса $InterfaceId = $($dhcpStatus.Dhcp)" "INFO"
+    Write-Log "DHCP condition for the interface $InterfaceId = $($dhcpStatus.Dhcp)" "INFO"
 
     # Remove IP address and gateways
     $existingIpAddresses = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $InterfaceId
     foreach ($ip in $existingIpAddresses) {
         Remove-NetIPAddress -InterfaceIndex $InterfaceId -IPAddress $ip.IPAddress -Confirm:$false
-        Write-Log "Удален существующий IP-адрес: $($ip.IPAddress)" "INFO"
+        Write-Log "The existing IP address is removed: $($ip.IPAddress)" "INFO"
     }
 
     # Remove routes from the network configuration
@@ -340,7 +352,7 @@ function Clear-NetworkConfig {
     }
 
     # Reset DNS-suffixes
-    $arguments = @{DNSDomainSuffixSearchOrder = @("")}  # Пустой массив для сброса
+    $arguments = @{DNSDomainSuffixSearchOrder = @("")}  # Empty array for reset this parameter
 
     $result = Invoke-CimMethod -ClassName Win32_NetworkAdapterConfiguration -MethodName "SetDNSSuffixSearchOrder" -Arguments $arguments
     if ($result.ReturnValue -eq 0) {
@@ -360,23 +372,23 @@ function Set-NetBiosOptions {
         [int]$NBTOption
     )
 
-    # Получаем информацию о сетевом адаптере
+    # We get information about the network adapter
     $adapter = Get-NetAdapter -InterfaceIndex $InterfaceId
     if ($adapter) {
-        # Путь к реестру для настройки NetBIOS
+        # The path to the Netbios setup registry
         $registryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\Tcpip_$($adapter.InterfaceGuid)"
         
-        # Проверяем, существует ли путь к реестру
+        # We check if there is a way to the registry
         if (Test-Path $registryPath) {
-            # Получаем текущее значение NetBIOS
+            # We get the current value of Netbios
             $currentValue = Get-NetBiosOptions -InterfaceId $InterfaceId
             
-            # Если текущее значение не совпадает с новым значением, обновляем его
+            # If the current value does not coincide with the new value, we update it
             if ($currentValue -ne $NBTOption) {
                 try {
                     Set-ItemProperty -Path $registryPath -Name "NetbiosOptions" -Value $NBTOption #-Verbose
                     
-                    # Проверяем новое значение
+                    # We check the new meaning
                     $newValue = Get-NetBiosOptions -InterfaceId $InterfaceId
                     if ($newValue -eq $NBTOption) {
                         return $true
@@ -405,29 +417,29 @@ function Get-NetBiosOptions {
         [int]$InterfaceId
     )
 
-    # Получаем информацию о сетевом адаптере
+    # We get information about the network adapter
     $adapter = Get-NetAdapter -InterfaceIndex $InterfaceId
     if ($adapter) {
-        # Путь к реестру для настройки NetBIOS
+        # The path to the Netbios setup registry
         $registryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters\Interfaces\Tcpip_$($adapter.InterfaceGuid)"
         
-        # Проверяем, существует ли путь к реестру
+        # We check if there is a way to the registry
         if (Test-Path $registryPath) {
-            # Устанавливаем значение TcpipNetbiosOptions (0 - по умолчанию, 1 - включить, 2 - отключить)
+            # Set the value of TCPIPNETBIOSOPTIONS (0 -by default, 1 -turn on, 2 -turn off)
             $propertyName = "NetbiosOptions"
             try {
                 $currentValue = (Get-ItemProperty -Path $registryPath -Name $propertyName).$propertyName
                 return $currentValue
             } catch {
-                Write-Log "Ошибка при получении значения свойства '$propertyName': $_" "ERROR"
+                Write-Log "Error when obtaining property value '$propertyName': $_" "ERROR"
                 return $null
             }
         } else {
-            Write-Log "Путь к реестру '$registryPath' не существует." "ERROR"
+            Write-Log "The path to the registry'$registryPath' does not exist." "ERROR"
             return $null
         }
     } else {
-        Write-Log "Сетевой адаптер с InterfaceIndex $InterfaceId не найден." "ERROR"
+        Write-Log "Network adapter with InterfaceIndex $InterfaceId was not found." "ERROR"
         return $null
     }
 }
@@ -473,7 +485,7 @@ function Set-StaticIP {
         }
         Write-Log "WINS servers $($WinsServers -join ', ') was applied for adapter '$($adapter.Name)'" "INFO"
     } catch {
-        Write-Log "Ошибка при настройке WINS-серверов: $($Error[0].Message)" "ERROR"
+        Write-Log "Error when setting up WINS servers: $($Error[0].Message)" "ERROR"
     }
 
     # Setup NetBIOS over TCP/IP
@@ -499,11 +511,10 @@ function Set-StaticIP {
 # Load configuration
 function Initialize-Configuration {
     param ([string]$EncryptedFilePath)
-
     if (Test-Path $EncryptedFilePath) {
         $decryptedConfig = Read-Config -EncryptedFilePath $EncryptedFilePath
         if (-not $decryptedConfig) {
-            Write-Log "Decrypted configuration is empty." "ERROR"
+            Write-Log "Decrypting configuration was failed." "ERROR"
             return $null
         }
         try {
@@ -525,19 +536,26 @@ function Initialize-Configuration {
 
 # Check available network adapters
 function Select-NetworkAdapter {
-    $Adapters = Get-NetAdapter | Where-Object { $_.MediaType -eq "802.3"  } #-and $_.Status -eq "Up"
+    $result = ""
+    $Adapters = Get-NetAdapter -Physical | Where-Object { $_.MediaType -eq "802.3"  } # it's may be added if we are not going to configure not connected adapter '-and $_.Status -eq "Up"'
     if ($Adapters.Count -eq 0) {
         Write-Log "No wired adapters available." "ERROR"
         return $null
     } elseif ($Adapters.Count -eq 1) {
         return $Adapters[0]
     } else {
-        Write-Log "Multiple adapters found. Prompting user for selection." "INFO"
+        $result = "Multiple adapters was found. Prompting user for selection.`n"
         for ($i = 0; $i -lt $Adapters.Count; $i++) {
-            Write-Log "$($i + 1): $($Adapters[$i].InterfaceDescription)" "INFO"
+            $result += "      $($i + 1):   $($Adapters[$i].InterfaceDescription)`n"
         }
+        Write-Log  $result "INFO"
         do {
-            $selection = Read-Host "Select adapter number (1-$($Adapters.Count)) or type 'q' to quit"
+            Write-Host "Select adapter number " -NoNewline
+            Write-Host "(1-$($Adapters.Count))" -ForegroundColor Yellow -NoNewline
+            Write-Host " or type " -NoNewline
+            Write-Host "'q'" -ForegroundColor Cyan -NoNewline
+            Write-Host " to quit:  " -NoNewline
+            $selection = Read-Host
             if ($selection -eq 'q') {
                 Write-Log "Administrator terminated the script." "INFO"
                 return $null
@@ -547,6 +565,17 @@ function Select-NetworkAdapter {
     }
 }
 
+function Read-Highlight {
+    param ([string]$HihglightedWord)
+    Write-Host "Do you want to use " -NoNewline
+    Write-Host "$HihglightedWord" -ForegroundColor Yellow -NoNewline
+    Write-Host " configuration for adapter '" -NoNewLine
+    Write-Host "$($SelectedAdapter.Name)" -ForegroundColor Yellow -NoNewLine
+    Write-Host "'?   " -NoNewline
+    Write-Host " (Yes/No)   " -ForegroundColor White  -NoNewline
+    $choice = Read-Host
+    return $choice
+}
 #########################
 # Main script execution
 #########################
@@ -558,31 +587,31 @@ if ($null -ne $SelectedAdapter) {
     # Display and log the adapter settings
     $currentConfiguration = Get-NetworkAdapterProperties -InterfaceId $InterfaceId
     Write-Log $currentConfiguration "INFO"
-    $choiceDhcp = Read-Host "Do you want to use DHCP-server for adapter '$($SelectedAdapter.Name)' ? (Yes/No)"
+    $choiceDhcp = Read-Highlight -HihglightedWord "DHCP"
     if ($choiceDhcp -match "(?i)^(n|no)$") {
-        Write-Log "Skip reconfiguration for DHCP." "INFO" # пользователь отказался от настройки dhcp
-        $choiceStatic = Read-Host "Do you want to use static params for adapter '$($SelectedAdapter.Name)' ? (Yes/No)"
-            if ($choiceStatic -match "(?i)^(n|no)$") {
-                Write-Log "Skip reconfiguration for static." "INFO"
-            } else {
-                # Trying to switch on static configuration
-                $config = Initialize-Configuration -EncryptedFilePath $EncryptedFilePath
-                if ($config) {
-                    Write-Log "Loaded configuration: `n $($config | ConvertTo-Json -Depth 10)" "INFO"
-                    $static = Set-StaticIP -IfaceId $InterfaceId -FixedIP $config.FixedIP -PrefixLength $config.PrefixLength -Gateway $config.Gateway -DnsServers $config.DnsServers -WinsServers $config.WinsServers -DnsSuffixes $config.DnsSuffixes
-                    if ($null -ne $static) {
-                        Write-Log "Static IP was configured for adapter '$($SelectedAdapter.Name)'." "INFO"
-                        Write-Log "Waiting 20 seconds for static configuration." "INFO"
-                        Restart-NetAdapter -Name $SelectedAdapter.Name
-                        Start-Sleep -Seconds 20
-                    } else {
-                        Write-Log "Error configuring static IP." "ERROR"
-                    }
+        Write-Log "Skip reconfiguration for DHCP." "INFO" # The user refused to configure DHCP
+        $choiceStatic = Read-Highlight -HihglightedWord "Static"
+        if ($choiceStatic -match "(?i)^(n|no)$") {
+            Write-Log "Skip reconfiguration for static." "INFO"
+        } else {
+            # Trying to switch on static configuration
+            $config = Initialize-Configuration -EncryptedFilePath $EncryptedFilePath
+            if ($config) {
+                Write-Log "Loaded configuration: `n $($config | ConvertTo-Json -Depth 10)" "INFO"
+                $static = Set-StaticIP -IfaceId $InterfaceId -FixedIP $config.FixedIP -PrefixLength $config.PrefixLength -Gateway $config.Gateway -DnsServers $config.DnsServers -WinsServers $config.WinsServers -DnsSuffixes $config.DnsSuffixes
+                if ($null -ne $static) {
+                    Write-Log "Static IP was configured for adapter '$($SelectedAdapter.Name)'." "INFO"
+                    Write-Log "Waiting 20 seconds for static configuration." "INFO"
+                    Restart-NetAdapter -Name $SelectedAdapter.Name
+                    Start-Sleep -Seconds 20
                 } else {
-                    Write-Log "Error loading configuration for static IP." "ERROR"
+                    Write-Log "Error configuring static IP." "ERROR"
                 }
-            } # либо пользователь отказался от статики, либо настроена статика и перегрузили адаптер, либо ошибка настройки статики 
-    } else { # пользователь выбрал dhcp
+            } else {
+                Write-Log "Error loading configuration for static IP." "ERROR"
+            }
+        } # Either the user refused statics, or the statics are configured and the adapter was overloaded, or the static tuning error 
+    } else { # The user chose DHCP
         Write-Log "Enabling DHCP..." "INFO"
         # Clean previous settings
         if (Clear-NetworkConfig -InterfaceId $InterfaceId) {
@@ -592,14 +621,14 @@ if ($null -ne $SelectedAdapter) {
             Write-Log "Waiting 20 seconds for applying DHCP configuration." "INFO"
             Restart-NetAdapter -Name $SelectedAdapter.Name
             Start-Sleep -Seconds 20
-        } else { # не удачная очистка параметров сети на адаптере
+        } else { # Not successful cleaning of the network parameters on the adapter
             Write-Log "Clear-NetworkConfig was failed." "ERROR"
-        } # dhcp либо настроен, либо выдано сообщение о неудачной попытке, но для попытки перенастроить на статику нужно перезапускать скрипт заново   
-    } # тут либо настроен адаптер, но не тестировали соединение, либо выдана ошибка пояснения причины неудачи настройки
+        } # dhcp or mood, or message about the unsuccessful result, but for the attempts to reconfigure on the adapter you have to restart the script again   
+    } # Here the adapter is either configured, but the connection was not tested, or an error of explanation of the reason for the failure of the configuration was issued
     if (Test-InternetConnection -InterfaceId $InterfaceId) {
-        Write-Log "Adapter '$($SelectedAdapter.Name)' configured for Internet access successfully." "INFO"
+        Write-Log "Adapter '$($SelectedAdapter.Name)' has Internet access." "INFO"
     } else {        
-        Write-Log "No internet connection for '$($SelectedAdapter.Name)'" "INFO"
+        Write-Log "No internet connection for '$($SelectedAdapter.Name)'" "WARN"
     }
     # Display and log the new adapter settings
     $currentConfiguration = Get-NetworkAdapterProperties -InterfaceId $InterfaceId

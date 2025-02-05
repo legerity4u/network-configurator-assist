@@ -21,7 +21,7 @@ This tool allows flexible network adapter configuration, switching between dynam
    ```
 3. Use the main script to configure the network as
    ```bash
-   .\NetworkConfig.ps1 -EncryptedFilePath <path_to_encrypted_file> [-Help] [-SilentMode]
+   .\NetworkConfig.ps1 -EncryptedFilePath <path_to_encrypted_file> [-Help]
    ```
 
 Applying static parameters requires entering the password used during configuration encryption.
